@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0a0a">
+<title>turbopuffer Query Incident Console: Slack incident to repro + diagnosis packet to human gate (synthetic prototype)</title>
+<meta name="description" content="Unofficial synthetic prototype of a turbopuffer customer engineer incident workbench: Slack incident intake, cited repro/diagnosis packet (cold cache, filter cardinality, query shape), human gates (Ship query fix / Pin namespace / Need minimal repro / Escalate to eng), and latency + cost impact. No login, no live API, not affiliated with turbopuffer.">
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #101010;
+    --panel-2: #161616;
+    --border: #262626;
+    --border-strong: #3a3a3a;
+    --text: #e8e8e8;
+    --muted: #9a9a9a;
+    --faint: #666666;
+    --green: #3fb950;
+    --green-soft: rgba(63, 185, 80, .12);
+    --red: #f85149;
+    --red-soft: rgba(248, 81, 73, .12);
+    --amber: #d29922;
+    --amber-soft: rgba(210, 153, 34, .12);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  html, body { margin: 0; background: var(--bg); }
+  body {
+    font-family: var(--mono);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.5;
+    overflow-x: hidden;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 16px 12px 40px; }
+
+  /* Terminal header */
+  .top {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 0 14px; border-bottom: 1px solid var(--border);
+    background: #0d0d0d;
+  }
+  .logo {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border: 1px solid var(--green); border-radius: 5px;
+    color: var(--green); font-size: 10px; font-weight: 700; overflow: hidden;
+  }
+  .brand { font-size: 13px; font-weight: 700; letter-spacing: .02em; }
+  .brand .dim { color: var(--faint); font-weight: 400; }
+  .ws { color: var(--muted); font-size: 12px; }
+  .top .spacer { flex: 1; }
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 10px; font-size: 11px; color: var(--muted);
+    letter-spacing: .05em;
+  }
+  .status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .status.open .dot { background: var(--amber); }
+  .status.ok .dot { background: var(--green); }
+  .status.warn .dot { background: var(--amber); }
+  .status.bad .dot { background: var(--red); }
+  .status b { color: var(--text); font-weight: 700; }
+  .view-title { font-size: 19px; font-weight: 700; margin: 20px 0 2px; }
+  .view-title .inc { color: var(--green); }
+  .view-sub { font-size: 12px; color: var(--muted); margin: 0 0 18px; }
+
+  /* Steps */
+  .step { margin-top: 4px; }
+  .stephead {
+    display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); padding: 14px 0 0;
+  }
+  .stephead .num { color: var(--green); }
+  .stephead .tag { color: var(--faint); text-transform: none; letter-spacing: 0; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 14px;
+    margin: 8px 0 6px;
+  }
+
+  /* Slack intake */
+  .slack { background: #0e0e0e; border-color: var(--border); }
+  .slack-head {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted); padding-bottom: 8px;
+  }
+  .hash {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px; border-radius: 5px;
+    background: #111; border: 1px solid var(--border); color: var(--muted);
+    font-size: 11px;
+  }
+  .chan { font-weight: 700; color: var(--text); }
+  .thread-name { color: var(--faint); font-size: 11px; }
+  .msg { display: flex; gap: 8px; margin-top: 10px; }
+  .avatar {
+    flex: none; width: 28px; height: 28px; border-radius: 6px;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: #0a0a0a;
+  }
+  .msg-body { min-width: 0; flex: 1; }
+  .msg-meta { font-size: 11.5px; color: var(--muted); }
+  .msg-meta .nm { color: var(--text); font-weight: 700; }
+  .msg-meta .role { color: var(--faint); }
+  .msg-meta .t { color: var(--faint); }
+  .msg-text { margin: 2px 0 0; font-size: 13.5px; color: #dcdcdc; word-wrap: break-word; }
+  .msg-text code { background: #161616; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 12px; color: var(--green); }
+  .msg.hl {
+    animation: pulse 1.6s 2;
+    border-radius: 6px; background: rgba(63, 185, 80, .08);
+    box-shadow: 0 0 0 2px var(--green);
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 1px var(--green); }
+    50% { box-shadow: 0 0 0 3px var(--green); }
+  }
+  .asks {
+    display: flex; align-items: flex-start; gap: 10px;
+    margin-top: 12px; background: var(--green-soft);
+    border: 1px solid rgba(63, 185, 80, .35); border-radius: 6px;
+    padding: 9px 10px;
+  }
+  .asks .ic {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 22px; height: 22px; border-radius: 4px; background: var(--green); color: #0a0a0a;
+    font-size: 11px; font-weight: 700;
+  }
+  .asks-txt { font-size: 12.5px; color: #c5c5c5; word-wrap: break-word; }
+  .asks-txt b { color: var(--text); font-weight: 700; }
+  .asks-txt .sub { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
+
+  /* ASCII box */
+  .ascii {
+    margin: 10px 0 0; padding: 10px 10px 4px;
+    background: #0c0c0c; border: 1px solid var(--border); border-radius: 6px;
+    font-size: 10.5px; line-height: 1.55; color: #b8b8b8;
+    white-space: pre-wrap; word-wrap: break-word; overflow-x: hidden;
+  }
+  .ascii .g { color: var(--green); }
+  .ascii .w { color: #e8e8e8; }
+  .ascii .r { color: var(--red); }
+
+  /* Pills */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 10.5px; font-weight: 700; line-height: 1;
+    padding: 4px 8px; border-radius: 3px; white-space: nowrap;
+    letter-spacing: .04em;
+  }
+  .pill.gray { background: rgba(255,255,255,.06); color: #c4c4c4; }
+  .pill.green { background: var(--green-soft); color: #61d573; }
+  .pill.red { background: var(--red-soft); color: #f07670; }
+  .pill.amber { background: var(--amber-soft); color: #e0b14d; }
+  .pillrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+
+  /* Packet */
+  .draft-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .draft-title { font-size: 16px; font-weight: 700; line-height: 1.35; margin: 10px 0 8px; word-wrap: break-word; }
+  .meta-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+  .into {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--muted); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px;
+  }
+  .into b { color: #d0d0d0; font-weight: 700; }
+  .draft-body p { margin: 0 0 8px; font-size: 13px; color: #d4d4d4; word-wrap: break-word; }
+  .draft-body p:last-child { margin-bottom: 4px; }
+  .draft-body b { color: var(--text); }
+  .kv { font-size: 12px; color: var(--muted); margin: 2px 0 10px; }
+  .kv .k { color: var(--faint); }
+  .kv .v { color: var(--text); }
+
+  /* Query diff block */
+  .qdiff { margin: 10px 0 4px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .qdiff .qlabel {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
+    background: #0e0e0e; padding: 6px 10px; border-bottom: 1px solid var(--border);
+  }
+  .qdiff pre {
+    margin: 0; padding: 10px; background: #0c0c0c;
+    font-size: 12px; line-height: 1.6; color: #bdbdbd;
+    white-space: pre-wrap; word-wrap: break-word; overflow-x: hidden;
+  }
+  .qdiff pre .w { color: #e0e0e0; }
+  .qdiff pre .c { color: var(--faint); }
+  .qdiff pre .g { color: var(--green); }
+  .qdiff.shipped { border-color: rgba(63,185,80,.5); }
+  .qdiff.shipped .qlabel { color: var(--green); }
+
+  /* Evidence chips */
+  .ev-label { font-size: 11px; color: var(--muted); margin: 12px 0 4px; }
+  .ev-hint { font-size: 11px; color: var(--faint); margin: 0 0 8px; }
+  .evwrap { display: flex; flex-direction: column; gap: 6px; }
+  .ev {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 5px; padding: 8px 10px; min-height: 42px;
+    font-size: 12px; color: #d0d0d0; width: 100%; text-align: left;
+    cursor: pointer; font-family: var(--mono);
+  }
+  .ev .q { flex: 1; text-align: left; word-wrap: break-word; min-width: 0; }
+  .ev .q code { color: var(--green); font-size: 11.5px; }
+  .ev .who { color: var(--faint); font-size: 11px; flex: none; }
+  .ev:active { transform: scale(.98); }
+  .ev.sel { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+  .citebox {
+    display: none; margin-top: 8px; border: 1px solid var(--green); border-radius: 6px;
+    background: #0b0f0b; overflow: hidden;
+  }
+  .citebox .chead {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; font-size: 11px; color: var(--green);
+    border-bottom: 1px solid rgba(63,185,80,.35);
+  }
+  .citebox pre {
+    margin: 0; padding: 10px; font-size: 11.5px; line-height: 1.6; color: #b8d8bb;
+    white-space: pre-wrap; word-wrap: break-word; overflow-x: hidden;
+  }
+  .draft-foot { font-size: 11px; color: var(--faint); margin-top: 10px; word-wrap: break-word; }
+
+  /* Gate */
+  .gate-copy { font-size: 12.5px; color: var(--muted); margin: 0 0 12px; }
+  .btnrow { display: flex; flex-direction: column; gap: 8px; }
+  .btn {
+    min-height: 46px; width: 100%; border-radius: 5px;
+    font-size: 13.5px; font-weight: 700; letter-spacing: .02em;
+    cursor: pointer; font-family: var(--mono);
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    text-align: center;
+  }
+  .btn .k { color: var(--faint); font-size: 11px; }
+  .btn.primary { background: var(--green); color: #0a0a0a; border: 1px solid var(--green); }
+  .btn.primary:hover { background: #4cc45d; }
+  .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border-strong); }
+  .btn.secondary:hover { border-color: var(--green); color: var(--green); }
+  .btn.danger { background: transparent; color: #f07670; border: 1px solid rgba(248,81,73,.45); }
+  .btn.danger:hover { background: var(--red-soft); }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .gate-note { font-size: 11px; color: var(--faint); margin: 10px 0 0; }
+
+  .resolved {
+    display: none; background: var(--green-soft); border: 1px solid rgba(63,185,80,.4);
+    border-radius: 6px; padding: 10px 12px; font-size: 13px; color: #cfe8d4;
+    margin: 6px 0 4px; word-wrap: break-word;
+  }
+  .resolved b { color: #e7f5e9; }
+  .resolved .again { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .resolved.warn { background: var(--amber-soft); border-color: rgba(210,153,34,.45); color: #e8d5a8; }
+  .resolved.warn b { color: #f2e3bd; }
+  .resolved.bad { background: var(--red-soft); border-color: rgba(248,81,73,.45); color: #f0c4c2; }
+  .resolved.bad b { color: #fadcdb; }
+
+  /* Panels */
+  .panel { display: none; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin: 8px 0 4px; }
+  .panel h4 { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); }
+  .missing { display: flex; flex-direction: column; gap: 6px; margin: 0 0 10px; }
+  .missing .mi {
+    border: 1px solid var(--border); border-radius: 5px; padding: 8px 10px;
+    background: var(--panel-2); font-size: 12px; color: #d0d0d0; word-wrap: break-word;
+  }
+  .missing .mi .b { color: var(--amber); font-weight: 700; }
+  .esc-card { border: 1px solid rgba(210,153,34,.5); background: var(--amber-soft); border-radius: 6px; padding: 10px 12px; font-size: 12.5px; color: #e8c58a; word-wrap: break-word; }
+  .esc-card b { color: #f0d9a8; }
+  .pnl-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .linklike { background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 10px 0; min-height: 42px; font-family: var(--mono); }
+  .linklike:hover { color: var(--text); }
+
+  /* Impact */
+  .impact-line { font-size: 13.5px; color: #d5d5d5; margin: 2px 0 12px; word-wrap: break-word; }
+  .impact-line b { color: var(--text); font-weight: 700; }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .stat { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px 4px; text-align: center; min-height: 58px; }
+  .stat .v { font-size: 15px; font-weight: 700; color: var(--text); display: block; word-wrap: break-word; }
+  .stat .v.new { color: var(--green); }
+  .stat .v.warnv { color: var(--amber); }
+  .stat .l { font-size: 10px; color: var(--muted); line-height: 1.3; display: block; margin-top: 3px; }
+  .impact-foot { font-size: 11px; color: var(--faint); margin-top: 10px; word-wrap: break-word; }
+
+  .foot { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--faint); display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  .foot .reset { background: none; border: 1px solid var(--border); color: var(--muted); border-radius: 5px; padding: 8px 14px; font-size: 12px; cursor: pointer; min-height: 42px; font-family: var(--mono); }
+  .foot .reset:hover { color: var(--text); border-color: var(--border-strong); }
+
+  @media (min-width: 700px) {
+    .wrap { padding: 24px 22px 56px; }
+    .evwrap { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .btnrow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="top">
+  <span class="logo" aria-hidden="true">tpuf</span>
+  <span class="brand">turbopuffer <span class="dim">/</span></span>
+  <span class="ws">CE console &middot; incident workbench</span>
+  <span class="spacer"></span>
+  <span class="status open" id="statusPill"><span class="dot"></span> <b id="statusTxt">OPEN</b></span>
+</div>
+
+<div class="wrap">
+  <h1 class="view-title">Query Incident <span class="inc">TPUF-1173</span></h1>
+  <p class="view-sub">meridian-prod &middot; hybrid search p90 1.2s after reindex &middot; reported 13:41 &middot; synthetic demo data</p>
+
+  <!-- 01 SLACK INCIDENT -->
+  <section class="step">
+    <div class="stephead"><span class="num">01</span> Customer Slack incident <span class="tag">from shared channel #meridian-turbopuffer</span></div>
+    <div class="card slack">
+      <div class="slack-head">
+        <span class="hash" aria-hidden="true">#</span>
+        <span class="chan">#meridian-turbopuffer</span>
+        <span class="thread-name">thread: hybrid query slow after reindex</span>
+      </div>
+      <div class="msg" id="m1">
+        <span class="avatar" style="background:#3fb950">MC</span>
+        <div class="msg-body">
+          <div class="msg-meta"><span class="nm">Mara Chen</span> <span class="role">Meridian infra</span> <span class="t">13:41</span></div>
+          <p class="msg-text">p90 on our hybrid search query jumped to <b>1.2s</b> after we reindexed. Warm hosts fine, cold ones brutal. 42M docs in <code>meridian-prod</code>.</p>
+        </div>
+      </div>
+      <div class="msg" id="m2">
+        <span class="avatar" style="background:#d29922">JP</span>
+        <div class="msg-body">
+          <div class="msg-meta"><span class="nm">Joel Park</span> <span class="role">Meridian backend</span> <span class="t">13:44</span></div>
+          <p class="msg-text">We run <code>rank_by hybrid --top_k 20</code> with a <code>price &lt; 100</code> filter. Was <b>44ms p50</b> before the reindex. No query code changed.</p>
+        </div>
+      </div>
+      <div class="msg" id="m3">
+        <span class="avatar" style="background:#7d8590">CE</span>
+        <div class="msg-body">
+          <div class="msg-meta"><span class="nm">tpuf CE agent</span> <span class="role">you</span> <span class="t">13:47</span></div>
+          <p class="msg-text">Pulled cache state, query plan, and search logs. Diagnosis packet drafted with cited evidence. Gating for a human decision.</p>
+        </div>
+      </div>
+      <div class="asks">
+        <span class="ic" aria-hidden="true">&gt;_</span>
+        <div class="asks-txt">
+          <b>Incident TPUF-1173</b> meridian-prod hybrid query p90 1.2s, cold after reindex
+          <span class="sub">Auto-opened 13:44 by CE agent. Customer: Meridian (synthetic). Namespace: meridian-prod. Status: diagnosis ready, waiting on human gate.</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 DIAGNOSIS PACKET -->
+  <section class="step">
+    <div class="stephead"><span class="num">02</span> Repro + diagnosis packet <span class="tag">every claim cited</span></div>
+    <div class="card" id="draftCard">
+      <div class="draft-head">
+        <span class="pill green" id="packetPill">PACKET DRAFTED</span>
+        <span class="pill gray">cold namespace hybrid query</span>
+        <span class="pill gray">p90 1.2s</span>
+      </div>
+      <h2 class="draft-title">Cold cache + low-selectivity filter applied post-merge keeps the top-20 path scanning cold object storage.</h2>
+      <div class="kv">
+        <span class="k">namespace &nbsp;</span><span class="v">meridian-prod &middot; 42M docs &middot; 2,048 segments</span><br>
+        <span class="k">query &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><span class="v">hybrid: vector top_k 20 + fts "wireless earbuds" + filter price &lt; 100</span><br>
+        <span class="k">reported &nbsp;&nbsp;</span><span class="v">p90 1.2s cold / 44ms p50 baseline before reindex</span>
+      </div>
+      <div class="ascii" aria-label="namespace cache state">
+<pre>┌─ ns: meridian-prod ────────────────┐
+│ cache: <span class="r">COLD</span>  hit <span class="w">0.9%</span> (6h)         │
+│ cold: <span class="w">2,048 segs</span> from              │
+│ object store, per query            │
+│ reindex 06:02 flushed warm         │
+│ p90 <span class="r">1.2s</span> · warm est <span class="g">38ms</span>           │
+└────────────────────────────────────┘</pre>
+      </div>
+      <div class="draft-body">
+        <p><b>Root cause:</b> two things stack. (1) The reindex flushed the warm cache, so every query cold-reads 2,048 segments from object storage. (2) The <code>price &lt; 100</code> filter matches <b>61%</b> of the namespace, so it is applied <b>post-merge</b> and narrows nothing; the scan cannot lean on it.</p>
+        <p>Fix shape: ship a rewrite that warms the namespace and adds a selective guard (<code>stock &gt; 0</code>, 61% &rarr; 9%) so the merge runs on a small candidate set. Cache-only pin is the conservative alternative. Both are gated below.</p>
+      </div>
+      <p class="ev-label">Evidence cited</p>
+      <p class="ev-hint">Tap a chip to open the raw source stub.</p>
+      <div class="evwrap">
+        <button class="ev" data-cite="c1">
+          <span class="q">cache state: <code>hit 0.9%</code> &middot; 2,048 segments cold</span>
+          <span class="who">metrics/cache</span>
+        </button>
+        <button class="ev" data-cite="c2">
+          <span class="q">filter cardinality: <code>price &lt; 100</code> = 61% &middot; applied post-merge</span>
+          <span class="who">query/plan</span>
+        </button>
+        <button class="ev" data-cite="c3">
+          <span class="q">log line: <code>cold read 2,048 segs (1.14s)</code></span>
+          <span class="who">logs/search</span>
+        </button>
+        <button class="ev" data-cite="c4">
+          <span class="q">query shape: <code>hybrid AND: vector + fts + merge + filter</code></span>
+          <span class="who">query/shape</span>
+        </button>
+      </div>
+      <div class="citebox" id="citeBox">
+        <div class="chead">
+          <span id="citeTitle">metrics/cache.json</span>
+          <span style="margin-left:auto;color:var(--faint)">source stub</span>
+        </div>
+        <pre id="citeBody"></pre>
+      </div>
+      <div class="qdiff" id="rewriteBlock">
+        <div class="qlabel">suggested rewrite &middot; warm hint included</div>
+        <pre><span class="c"># original (customer, deploys unchanged)</span>
+tpuf query meridian-prod --rank_by hybrid --top_k 20
+  --fts "wireless earbuds" --filter "price &lt; 100"
+
+<span class="c"># rewrite: pre-warm + selective guard before merge</span>
+tpuf query meridian-prod <span class="g">--warm</span> --rank_by hybrid --top_k 20
+  --fts "wireless earbuds"
+  --filter <span class="g">"price &lt; 100 AND stock &gt; 0"</span>  <span class="c"># sel 0.61 -&gt; 0.09</span></pre>
+      </div>
+      <p class="draft-foot">Sources: metrics/cache.json (6h window), query/plan, logs/search.log 13:41:07Z, Slack thread (3 messages). No live tpuf API used; data is synthetic.</p>
+    </div>
+  </section>
+
+  <!-- 03 HUMAN GATE -->
+  <section class="step">
+    <div class="stephead"><span class="num">03</span> Human gate <span class="tag">CE owns the outcome</span></div>
+    <p class="gate-copy">Pick one. The customer Slack thread stays untouched until this decision lands.</p>
+    <div class="resolved" id="resolvedBox">
+      <b id="resolvedHead">Ship query fix.</b> <span id="resolvedTxt"></span>
+      <button class="again linklike" id="againBtn" style="display:block;width:100%;text-align:left;color:var(--muted)">Run another path: reset and try Pin namespace, Need minimal repro, or Escalate.</button>
+    </div>
+    <div class="btnrow" id="gateBtns">
+      <button class="btn primary" id="btnShip">
+        <span class="k">[S]</span> Ship query fix
+      </button>
+      <button class="btn secondary" id="btnPin">
+        <span class="k">[P]</span> Pin namespace
+      </button>
+      <button class="btn secondary" id="btnRepro">
+        <span class="k">[R]</span> Need minimal repro
+      </button>
+      <button class="btn danger" id="btnEsc">
+        <span class="k">[E]</span> Escalate to eng
+      </button>
+    </div>
+    <p class="gate-note">Each path is a real decision: ship the fix, hold with a cache pin, ask for a repro, or hand to platform eng.</p>
+
+    <!-- Need minimal repro panel -->
+    <div class="panel" id="reproPanel">
+      <h4>Missing artifacts before we can ship a fix</h4>
+      <div class="missing">
+        <div class="mi"><span class="b">[ ]</span> rerunnable query against current meridian-prod data (reindex changed data shape)</div>
+        <div class="mi"><span class="b">[ ]</span> golden top-20 result ids for the shipped query</div>
+        <div class="mi"><span class="b">[ ]</span> per-span timing on one cold host, one warm host</div>
+        <div class="mi"><span class="b">[ ]</span> customer-side cache pin flag, or approval to pin on their behalf</div>
+      </div>
+      <div class="esc-card"><b>Why the incident stays open:</b> the diagnosis is inferred from logs and metrics. Meridian's reindex changed the data shape, so we cannot prove the rewrite on a live query without a minimal repro. There is no ground truth to ship against yet.</div>
+      <div class="pnl-actions">
+        <button class="btn secondary" id="btnReproConfirm">
+          <span class="k">[R]</span> Keep incident open: needs minimal repro
+        </button>
+        <button class="linklike" id="btnReproCancel">Back to gates</button>
+      </div>
+    </div>
+
+    <!-- Escalate panel -->
+    <div class="panel" id="escPanel">
+      <div class="esc-card">
+        <b>Handoff to storage eng, Onyx (platform).</b> Platform suspicion: the 06:02 reindex flushed the warm cache with no pre-warm path, and a 42M-doc namespace cold-reads 2,048 segments per query. That is a platform behavior, not a customer query bug. Packet TPUF-1173 included.
+      </div>
+      <div class="pnl-actions">
+        <button class="btn danger" id="btnEscConfirm">
+          <span class="k">[E]</span> Escalate with packet
+        </button>
+        <button class="linklike" id="btnEscCancel">Back to gates</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 04 CUSTOMER IMPACT -->
+  <section class="step">
+    <div class="stephead"><span class="num">04</span> Customer impact <span class="tag">latency + cost, one line</span></div>
+    <div class="card">
+      <p class="impact-line" id="impactLine">Waiting on the gate: <b>meridian-prod p90 stays at 1.2s</b> until a human decision lands.</p>
+      <div class="stats">
+        <div class="stat"><span class="v" id="statP90">1.2s</span><span class="l">p90 latency<br>hybrid query</span></div>
+        <div class="stat"><span class="v" id="statP50">44ms</span><span class="l">p50 latency<br>cold after reindex</span></div>
+        <div class="stat"><span class="v" id="statCost">$412</span><span class="l">cost per 10M queries<br>object-store reads</span></div>
+      </div>
+      <p class="impact-foot" id="impactFoot">Synthetic numbers for the demo. Real numbers would stream from metrics/cache, query/plan, and billing stubs.</p>
+    </div>
+  </section>
+
+  <div class="foot">
+    <button class="reset" id="resetBtn">reset demo</button>
+    <span>Synthetic prototype: no login, no live turbopuffer API, no real customer data. Not affiliated with turbopuffer. Built as a 2-hour product sketch: Slack incident to cited repro + diagnosis packet to human gate to latency/cost impact.</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var base = {
+    line: 'Waiting on the gate: <b>meridian-prod p90 stays at 1.2s</b> until a human decision lands.',
+    p90: '1.2s', p90New: false, p90Warn: false,
+    p50: '44ms', p50New: false, p50Warn: false,
+    cost: '$412', costNew: false, costWarn: false,
+    foot: 'Synthetic numbers for the demo. Real numbers would stream from metrics/cache, query/plan, and billing stubs.'
+  };
+  var cites = {
+    c1: { t: 'metrics/cache.json', s: '{\n  "ns": "meridian-prod",\n  "cache_hit_ratio": 0.009,\n  "cold_segments": 2048,\n  "window": "6h",\n  "event": "reindex at 06:02 flushed warm set"\n}' },
+    c2: { t: 'query/plan', s: 'filter "price < 100" -> selectivity 0.61 (25.6M / 42M docs)\napplication: POST-MERGE (not selective enough to pre-filter)\nmerge: vector_scan(top_k 20) + fts_scan(419k docs)' },
+    c3: { t: 'logs/search.log', s: '2026-09-30 13:41:07Z WARN ns=meridian-prod cold read 2048 segments from object store (1.14s) p90=1.2s\n2026-09-30 13:41:07Z INFO ns=meridian-prod warm-host p90=38ms (control host)' },
+    c4: { t: 'query/shape', s: 'hybrid AND pipeline: vector_scan(top_k 20) -> fts_scan("wireless earbuds", 419k) -> merge -> filter price < 100 -> rank_by hybrid\ncold segments touched per query: 2048' }
+  };
+  var selCite = null;
+
+  function setStatus(cls, txt) {
+    var p = document.getElementById('statusPill');
+    p.className = 'status ' + cls;
+    document.getElementById('statusTxt').textContent = txt;
+  }
+  function setPill(txt, cls) {
+    var p = document.getElementById('packetPill');
+    p.textContent = txt;
+    p.className = 'pill ' + cls;
+  }
+  function setResolved(cls, head, txt) {
+    var box = document.getElementById('resolvedBox');
+    box.className = 'resolved ' + cls;
+    box.style.display = 'block';
+    document.getElementById('resolvedHead').textContent = head + ' ';
+    document.getElementById('resolvedTxt').innerHTML = txt;
+  }
+  function disableGates() {
+    ['btnShip', 'btnPin', 'btnRepro', 'btnEsc'].forEach(function (id) {
+      document.getElementById(id).disabled = true;
+    });
+  }
+  function setStat(id, val, fresh, warn) {
+    var el = document.getElementById(id);
+    el.textContent = val;
+    el.className = 'v' + (fresh ? ' new' : '') + (warn ? ' warnv' : '');
+  }
+  function impact(line, p90, p90N, p90W, p50, p50N, p50W, cost, costN, costW, foot) {
+    document.getElementById('impactLine').innerHTML = line;
+    setStat('statP90', p90, p90N, p90W);
+    setStat('statP50', p50, p50N, p50W);
+    setStat('statCost', cost, costN, costW);
+    document.getElementById('impactFoot').textContent = foot;
+  }
+  function resolveState() {
+    disableGates();
+    document.querySelectorAll('.panel').forEach(function (p) { p.style.display = 'none'; });
+  }
+  function markShipped() {
+    var b = document.getElementById('rewriteBlock');
+    b.classList.add('shipped');
+    b.querySelector('.qlabel').textContent = 'shipped fix + warm pin &middot; confirmed green on canary';
+  }
+
+  function ship() {
+    resolveState();
+    markShipped();
+    setStatus('ok', 'RESOLVED');
+    setPill('SHIPPED', 'green');
+    setResolved('', 'Ship query fix.',
+      'Rewrite + warm pin posted to #meridian-turbopuffer at 13:52. Meridian confirmed green on canary at 14:05. Incident closed. <b>show &gt; tell: Meridian sees the fix, not a promise.</b>');
+    impact('Shipped: <b>p90 1.2s &rarr; 86ms</b>, p50 44ms &rarr; 38ms, cost &darr;71%. Meridian canary green at 14:05.',
+      '86ms', true, false, '38ms', true, false, '$118', true, false,
+      'Fix + warm pin shipped at 13:52. Re-run the incident in 24h to confirm the warm set survived traffic (auto-check queued).');
+  }
+  function pin() {
+    resolveState();
+    setStatus('ok', 'RESOLVED');
+    setPill('PINNED', 'amber');
+    setResolved('warn', 'Pin namespace.',
+      'meridian-prod pinned warm for 24h. p90 drops once the cache re-warms, but the low-selectivity filter still scans post-merge. Follow-up tagged: rewrite pending Meridian repro of current data. <b>Honest: cache is handled, query shape is not.</b>');
+    impact('Pinned: <b>p90 1.2s &rarr; 210ms</b> after re-warm; cost &darr;3%. Query shape still suboptimal, follow-up TPUF-1173-F tagged.',
+      '210ms', true, false, '40ms', true, false, '$399', true, true,
+      'Pin held 24h, then reverts. Follow-up for the rewrite stays open with the customer; no false "fixed" claim.');
+  }
+  function repro() {
+    resolveState();
+    setStatus('warn', 'NEEDS REPRO');
+    setPill('NEED REPRO', 'amber');
+    setResolved('warn', 'Incident open.',
+      'Slack reply at 13:55 asks Meridian for the four missing artifacts. Reason: diagnosis is inferred from logs; the reindex changed data shape, so the rewrite is not proven on a live query. No fix shipped without ground truth.');
+    impact('Open, repro needed: <b>p90 stays 1.2s</b>; no latency claim is made until Meridian sends a rerunnable query + golden results.',
+      '1.2s', false, true, '44ms', false, true, '$412', false, true,
+      'Waiting on Meridian: 4 artifacts requested at 13:55. CE follows up at EOD; escalation path stays one tap away.');
+  }
+  function escalate() {
+    resolveState();
+    setStatus('bad', 'ESCALATED');
+    setPill('ESCALATED', 'red');
+    setResolved('bad', 'Escalate to eng.',
+      'Packet TPUF-1173 handed to Onyx (storage eng) at 13:58 with the cache-flush suspicion. Meridian notified: query fix on hold until platform answers. SLA: same-business-day first response.');
+    impact('Escalated: <b>ownership moved to storage eng</b>; latency unchanged until platform path lands. Customer notified at 13:58.',
+      '1.2s', false, true, '44ms', false, true, '$412', false, true,
+      'Escalation tracked with the packet attached; CE stays in the thread and owns the customer outcome through resolution.');
+  }
+
+  function hidePanels() {
+    document.querySelectorAll('.panel').forEach(function (p) { p.style.display = 'none'; });
+  }
+
+  function showCite(id) {
+    document.querySelectorAll('.ev').forEach(function (e) {
+      e.classList.toggle('sel', e.getAttribute('data-cite') === id);
+    });
+    var box = document.getElementById('citeBox');
+    if (selCite === id) { selCite = null; box.style.display = 'none'; return; }
+    selCite = id;
+    var c = cites[id];
+    document.getElementById('citeTitle').textContent = c.t;
+    document.getElementById('citeBody').textContent = c.s;
+    box.style.display = 'block';
+    document.getElementById(draftCardId()).scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+  function draftCardId() { return 'draftCard'; }
+
+  document.querySelectorAll('.ev').forEach(function (btn) {
+    btn.addEventListener('click', function () { showCite(btn.getAttribute('data-cite')); });
+  });
+
+  document.getElementById('btnShip').addEventListener('click', ship);
+  document.getElementById('btnPin').addEventListener('click', pin);
+  document.getElementById('btnRepro').addEventListener('click', function () { showPanel('reproPanel'); });
+  document.getElementById('btnReproConfirm').addEventListener('click', repro);
+  document.getElementById('btnReproCancel').addEventListener('click', hidePanels);
+  document.getElementById('btnEsc').addEventListener('click', function () { showPanel('escPanel'); });
+  document.getElementById('btnEscConfirm').addEventListener('click', escalate);
+  document.getElementById('btnEscCancel').addEventListener('click', hidePanels);
+  document.getElementById('againBtn').addEventListener('click', function () { location.reload(); });
+  document.getElementById('resetBtn').addEventListener('click', function () { location.reload(); });
+})();
+</script>
+</body>
+</html>
